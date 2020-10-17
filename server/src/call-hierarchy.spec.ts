@@ -7,6 +7,7 @@
 
 import * as chai from 'chai';
 import * as lsp from 'vscode-languageserver';
+import * as lspCallHierarchy from './call-hierarchy.lsp.proposed';
 import { LspServer } from './lsp-server';
 import { uri, createServer, position, lastPosition } from './test-utils';
 import { TextDocument } from 'vscode-languageserver';
@@ -53,45 +54,6 @@ describe('completion', () => {
         const item = proposals.filter(i => i.label === 'addEventListener')[0];
         const resolvedItem = await server.completionResolve(item)
         assert.isTrue(resolvedItem.detail !== undefined, JSON.stringify(resolvedItem, undefined, 2));
-        server.didCloseTextDocument({
-            textDocument: doc
-        });
-    }).timeout(10000);
-
-    it('simple JS test', async () => {
-        const doc = {
-            uri: uri('bar.js'),
-            languageId: 'javascript',
-            version: 1,
-            text: `
-        export function foo() {
-          console.log('test')
-        }
-      `
-        }
-        server.didOpenTextDocument({
-            textDocument: doc
-        })
-        const pos = position(doc, 'console');
-        const proposals = await server.completion({
-            textDocument: doc,
-            position: pos
-        }) as TSCompletionItem[];
-        assert.isTrue(proposals.length > 800, String(proposals.length));
-        const item = proposals.filter(i => i.label === 'addEventListener')[0];
-        const resolvedItem = await server.completionResolve(item)
-        assert.isTrue(resolvedItem.detail !== undefined, JSON.stringify(resolvedItem, undefined, 2));
-
-        const containsInvalidCompletions = proposals.reduce((accumulator, current) => {
-            if (accumulator) {
-                return accumulator
-            }
-
-            // console.log as a warning is erroneously mapped to a non-function type
-            return current.label === "log" && current.kind !== lsp.CompletionItemKind.Function
-        }, false)
-
-        assert.isFalse(containsInvalidCompletions)
         server.didCloseTextDocument({
             textDocument: doc
         });
@@ -396,34 +358,8 @@ describe('formatting', () => {
         const result = lsp.TextDocument.applyEdits(TextDocument.create(uriString, languageId, version, text), edits);
         assert.equal('function foo() {\n\t// some code\n}', result);
     }).timeout(10000);
-
-    it('selected range', async () => {
-        const text = 'function foo() {\nconst first = 1;\nconst second = 2;\nconst val = foo( "something" );\n//const fourth = 4;\n}';
-        const textDocument = {
-            uri: uriString, languageId, version, text
-        }
-        server.didOpenTextDocument({ textDocument })
-        const edits = await server.documentRangeFormatting({
-            textDocument,
-            range: {
-                start: {
-                    line: 2,
-                    character: 0,
-                },
-                end: {
-                    line: 3,
-                    character: 30,
-                },
-            },
-            options: {
-                tabSize: 4,
-                insertSpaces: true
-            }
-        })
-        const result = lsp.TextDocument.applyEdits(TextDocument.create(uriString, languageId, version, text), edits);
-        assert.equal('function foo() {\nconst first = 1;\n    const second = 2;\n    const val = foo("something");\n//const fourth = 4;\n}', result);
-    }).timeout(10000);
 });
+
 
 describe('signatureHelp', () => {
     it('simple test', async () => {
@@ -489,5 +425,178 @@ describe('documentHighlight', () => {
             position: lastPosition(fooDoc, 'Bar')
         });
         assert.equal(2, result.length, JSON.stringify(result, undefined, 2));
+    }).timeout(10000);
+});
+
+describe('callHierarchy', () => {
+    function resultToString(item: lspCallHierarchy.CallHierarchyItem | null) {
+        if (!item) {
+            return '<not found>';
+        }
+        const arrow = '-|>';
+        const symbolToString = (item: lspCallHierarchy.CallHierarchyItem) =>
+            `${item.name} (symbol: ${item.uri.split('/').pop()}#${item.selectionRange.start.line})`;
+        const callToString = (call: lspCallHierarchy.CallHierarchyItem) =>
+            `  ${arrow} ${symbolToString(call)} - (call: ${call.callLocations![0].uri.split('/').pop()}#${call.callLocations![0].range.start.line})`;
+        const out: string[] = [];
+        out.push(`${arrow} ${symbolToString(item)}`);
+        if (item.calls) {
+            out.push(`calls:`);
+            for (const call of item.calls) {
+                out.push(callToString(call));
+            }
+        }
+        return out.join('\n').trim();
+    }
+    const oneDoc = {
+        uri: uri('one.ts'),
+        languageId: 'typescript',
+        version: 1,
+        text: `// comment line
+import { Two } from './two'
+export function main() {
+    new Two().callThreeTwice();
+}`
+    };
+
+    const twoDoc = {
+        uri: uri('two.ts'),
+        languageId: 'typescript',
+        version: 1,
+        text: `// comment line
+import { Three } from "./three";
+export class Two {
+    callThreeTwice() {
+        new Three().tada();
+        new Three().tada();
+    }
+}
+`};
+    const threeDoc = {
+        uri: uri('three.ts'),
+        languageId: 'typescript',
+        version: 1,
+        text: `// comment line
+export class Three {
+    tada() {
+        print('🎉');
+    }
+}
+export function print(s: string) {
+    console.log(s);
+}
+`
+    };
+
+    function openDocuments() {
+        for (const textDocument of [oneDoc, twoDoc, threeDoc]) {
+            server.didOpenTextDocument({ textDocument });
+        }
+    }
+
+    it('find target symbol', async () => {
+        openDocuments();
+        const item = await server.callHierarchy(<lspCallHierarchy.CallHierarchyParams>{
+            textDocument: twoDoc,
+            position: lsp.Position.create(4, 22),
+            direction: lspCallHierarchy.CallHierarchyDirection.Incoming,
+            resolve: 0
+        });
+        assert.equal(resultToString(item),
+            `
+-|> tada (symbol: three.ts#2)
+            `.trim()
+        );
+    }).timeout(10000);
+
+    it('calls: first level', async () => {
+        openDocuments();
+        const item = await server.callHierarchy(<lspCallHierarchy.CallHierarchyParams>{
+            textDocument: twoDoc,
+            position: lsp.Position.create(4, 22),
+            direction: lspCallHierarchy.CallHierarchyDirection.Incoming,
+            resolve: 1
+        });
+        assert.equal(resultToString(item),
+            `
+-|> tada (symbol: three.ts#2)
+calls:
+  -|> callThreeTwice (symbol: two.ts#3) - (call: two.ts#4)
+  -|> callThreeTwice (symbol: two.ts#3) - (call: two.ts#5)
+            `.trim()
+        );
+    }).timeout(10000);
+
+    it('calls: second level', async () => {
+        openDocuments();
+        const firstItem = await server.callHierarchy(<lspCallHierarchy.CallHierarchyParams>{
+            textDocument: twoDoc,
+            position: lsp.Position.create(4, 22),
+            direction: lspCallHierarchy.CallHierarchyDirection.Incoming,
+            resolve: 1
+        });
+        assert.isTrue(firstItem !== null, "precondition failed: first level");
+        assert.isTrue(firstItem!.calls !== undefined, "precondition failed: unresolved callers of first level");
+        assert.isTrue(firstItem!.calls![0] !== undefined, "precondition failed: unresolved callers of first level");
+
+        const unresolvedItem = firstItem!.calls![0];
+        const callsResult = await server.callHierarchyResolve(<lspCallHierarchy.ResolveCallHierarchyItemParams>{
+            item: unresolvedItem,
+            direction: lspCallHierarchy.CallHierarchyDirection.Incoming,
+            resolve: 1
+        });
+        assert.equal(
+            resultToString(callsResult),
+            `
+-|> callThreeTwice (symbol: two.ts#3)
+calls:
+  -|> main (symbol: one.ts#2) - (call: one.ts#3)
+            `.trim()
+        );
+    }).timeout(10000);
+
+    it('calls: first step', async () => {
+        openDocuments();
+        const item = await server.callHierarchy({
+            textDocument: oneDoc,
+            position: lsp.Position.create(3, 18), // `callThreeTwice()`
+            direction: lspCallHierarchy.CallHierarchyDirection.Outgoing,
+            resolve: 1
+        });
+        assert.equal(resultToString(item),
+            `
+-|> callThreeTwice (symbol: two.ts#3)
+calls:
+  -|> Three (symbol: two.ts#1) - (call: two.ts#4)
+  -|> tada (symbol: three.ts#2) - (call: two.ts#4)
+  -|> Three (symbol: two.ts#1) - (call: two.ts#5)
+  -|> tada (symbol: three.ts#2) - (call: two.ts#5)`.trim()
+        );
+    }).timeout(10000);
+
+    it('calls: second step', async () => {
+        openDocuments();
+        const firstItem = await server.callHierarchy({
+            textDocument: oneDoc,
+            position: lsp.Position.create(3, 18), // `callThreeTwice()`
+            direction: lspCallHierarchy.CallHierarchyDirection.Outgoing,
+            resolve: 1
+        });
+        assert.isTrue(firstItem !== null, "precondition failed: first level");
+        assert.isTrue(firstItem!.calls !== undefined, "precondition failed: unresolved callers of first level");
+        assert.isTrue(firstItem!.calls![1] !== undefined, "precondition failed: unresolved callers of first level");
+
+        const unresolvedItem = firstItem!.calls![1];
+        const item = await server.callHierarchyResolve({
+            item: unresolvedItem,
+            direction: lspCallHierarchy.CallHierarchyDirection.Outgoing,
+            resolve: 1
+        });
+        assert.equal(resultToString(item),
+            `
+-|> tada (symbol: three.ts#2)
+calls:
+  -|> print (symbol: three.ts#6) - (call: three.ts#3)`.trim()
+        );
     }).timeout(10000);
 });

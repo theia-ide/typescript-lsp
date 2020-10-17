@@ -19,6 +19,7 @@ Maintained by [TypeFox](https://typefox.io) and others.
 - [x] textDocument/didSave
 
 - [x] textDocument/codeAction
+- [x] textDocument/callHierarchy (proposed protocol extension)
 - [x] textDocument/completion (incl. completion/resolve)
 - [x] textDocument/definition
 - [x] textDocument/documentHighlight
