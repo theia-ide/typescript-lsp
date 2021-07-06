@@ -12,7 +12,7 @@ import { ScriptElementKind } from './tsp-command-types';
 import { asRange, toTextEdit, asPlainText, asDocumentation } from './protocol-translation';
 import { Commands } from './commands';
 
-export interface TSCompletionItem extends lsp.CompletionItem {
+interface TSCompletionItem extends lsp.CompletionItem {
     data: tsp.CompletionDetailsRequestArgs;
 }
 
@@ -145,7 +145,7 @@ function asCommitCharacters(kind: ScriptElementKind): string[] | undefined {
     return commitCharacters.length === 0 ? undefined : commitCharacters;
 }
 
-export function asResolvedCompletionItem(item: TSCompletionItem, details: tsp.CompletionEntryDetails): TSCompletionItem {
+export function asResolvedCompletionItem(item: lsp.CompletionItem, details: tsp.CompletionEntryDetails): lsp.CompletionItem {
     item.detail = asDetail(details);
     item.documentation = asDocumentation(details);
     Object.assign(item, asCodeActions(details, item.data.file));
